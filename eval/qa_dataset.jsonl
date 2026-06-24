@@ -1,0 +1,10 @@
+{"question": "At what blood pressure is hypertension diagnosed?", "expected_answer": "Persistently at or above 130/80 mmHg across two visits.", "expected_source": "hypertension_guideline.md"}
+{"question": "What are the first-line pharmacologic options for hypertension?", "expected_answer": "Thiazide diuretic, ACE inhibitor, ARB, or calcium channel blocker.", "expected_source": "hypertension_guideline.md"}
+{"question": "Can ACE inhibitors and ARBs be combined?", "expected_answer": "No — combining them risks hyperkalemia and renal injury.", "expected_source": "hypertension_guideline.md"}
+{"question": "What is the eGFR contraindication threshold for metformin?", "expected_answer": "eGFR below 30 mL/min/1.73m^2.", "expected_source": "metformin_drug_info.md"}
+{"question": "What is the maximum daily dose of metformin?", "expected_answer": "2000 mg/day in divided doses.", "expected_source": "metformin_drug_info.md"}
+{"question": "How should metformin be handled around iodinated contrast?", "expected_answer": "Hold before and for 48 hours after contrast in at-risk patients.", "expected_source": "metformin_drug_info.md"}
+{"question": "What is step 1 therapy for asthma?", "expected_answer": "As-needed low-dose ICS-formoterol.", "expected_source": "asthma_management.md"}
+{"question": "When should asthma therapy be stepped down?", "expected_answer": "After 3 months of sustained control.", "expected_source": "asthma_management.md"}
+{"question": "How much did systolic BP fall in the SYNTH-HTN trial versus placebo?", "expected_answer": "22 mmHg more than placebo.", "expected_source": "synth_htn_trial_abstract.md"}
+{"question": "Are ACE inhibitors safe in pregnancy?", "expected_answer": "No — ACE inhibitors and ARBs are contraindicated in pregnancy.", "expected_source": "hypertension_guideline.md"}
