@@ -37,6 +37,33 @@ class Settings(BaseSettings):
     top_k: int = 5
     max_tokens: int = 2000
 
+    # --- hybrid retrieval (F16) ---
+    retrieval_mode: Literal["dense", "hybrid"] = "hybrid"
+    retrieve_fetch_k: int = 20  # candidates each arm fetches before fusion / rerank
+    rrf_k: int = 60  # Reciprocal Rank Fusion constant
+
+    # --- re-ranking (F17) ---
+    rerank_enabled: bool = False
+    rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+    # --- upload (F18) ---
+    max_upload_mb: int = 25
+
+    # --- conversation memory (F19) ---
+    history_max_turns: int = 6  # most recent turns kept when condensing follow-ups
+    feedback_path: Path = PROJECT_ROOT / "data" / "feedback.jsonl"
+
+    # --- OCR ingestion (F20; local Tesseract, no keys) ---
+    ocr_enabled: bool = True  # OCR images + scanned PDFs during ingest
+    ocr_lang: str = "eng"  # tesseract language pack(s), e.g. "eng+deu"
+    ocr_dpi: int = 200  # rasterization DPI for scanned PDF pages
+    ocr_min_chars_per_page: int = 40  # below this avg -> PDF treated as scanned
+
+    # --- cleaning pipeline (F21) ---
+    clean_enabled: bool = True  # normalize/strip noise between load and split
+    dedupe_enabled: bool = True  # drop near-duplicate chunks after splitting
+    dedupe_threshold: float = 0.9  # Jaccard(shingles) >= this => duplicate
+
     # --- storage ---
     data_dir: Path = PROJECT_ROOT / "data"
     chroma_dir: Path = PROJECT_ROOT / "chroma_db"

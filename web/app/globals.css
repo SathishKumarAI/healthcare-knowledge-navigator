@@ -1,9 +1,96 @@
 @import "tailwindcss";
 
+/* ── Design tokens ──────────────────────────────────────────────────────────
+   A calm, trustworthy clinical palette: green brand, slate neutrals.
+   Surfaces are driven by CSS variables so light/dark is a single class flip. */
+@theme {
+  --color-brand-50: #f0fdf4;
+  --color-brand-100: #dcfce7;
+  --color-brand-200: #bbf7d0;
+  --color-brand-400: #4ade80;
+  --color-brand-500: #16a34a;
+  --color-brand-600: #15803d;
+  --color-brand-700: #166534;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
 :root {
+  --bg: #f7f8fb;
+  --surface: #ffffff;
+  --surface-2: #f1f3f9;
+  --border: #e5e8f0;
+  --text: #0f172a;
+  --text-muted: #64748b;
   --accent: #16a34a;
 }
 
-body {
-  @apply bg-slate-50 text-slate-900 antialiased;
+.dark {
+  --bg: #0b0e1a;
+  --surface: #131829;
+  --surface-2: #1b2236;
+  --border: #283149;
+  --text: #e8ebf5;
+  --text-muted: #94a0bd;
+  --accent: #4ade80;
+}
+
+@layer base {
+  html {
+    background: var(--bg);
+  }
+  body {
+    @apply antialiased;
+    background: var(--bg);
+    color: var(--text);
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+  ::selection {
+    background: color-mix(in srgb, var(--accent) 25%, transparent);
+  }
+}
+
+/* Reusable surface helpers bound to the theme variables. */
+.surface {
+  background: var(--surface);
+  border-color: var(--border);
+}
+.surface-2 {
+  background: var(--surface-2);
+}
+.muted {
+  color: var(--text-muted);
+}
+
+/* Streaming caret + answer typography. */
+.caret::after {
+  content: "▍";
+  margin-left: 1px;
+  animation: blink 1s steps(2, start) infinite;
+  color: var(--accent);
+}
+@keyframes blink {
+  to {
+    visibility: hidden;
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.rise {
+  animation: rise 0.25s ease-out both;
+}
+
+/* Thin, theme-aware scrollbars. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
 }

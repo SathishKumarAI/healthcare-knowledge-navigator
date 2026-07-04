@@ -1,8 +1,10 @@
 // Domain config — the only file that changes between the three projects.
 export const siteConfig = {
   name: "Healthcare Knowledge Navigator",
+  shortName: "Knowledge Navigator",
   tagline:
     "Ask clinical questions about the reference documents. Every answer cites the source it came from.",
+  domainLabel: "Healthcare · Clinical",
   accent: "#16a34a", // green
   disclaimer:
     "Informational support for professionals — not medical advice. Sample data is synthetic.",
