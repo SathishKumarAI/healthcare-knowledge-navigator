@@ -6,8 +6,8 @@ web UI; the file is persisted, chunked, embedded, and merged into the live index
 without a full re-ingest.
 
 ## Problem / why
-Today the corpus is fixed at ingest time. Users want to drop in the deck or 10-K
-they're actually evaluating and ask about it immediately.
+Today the corpus is fixed at ingest time. Users want to drop in the clinical guideline
+or drug label they're actually evaluating and ask about it immediately.
 
 ## Users & context
 Web UI users via an Upload control; programmatic callers via `POST /v1/upload`.
