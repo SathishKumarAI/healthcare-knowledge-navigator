@@ -81,6 +81,15 @@ WEAK_COVERAGE = 0.40
 _META_RE = re.compile(
     r"\b(?:i cannot|i can't|i am unable|i'm unable|cannot provide|can't provide"
     r"|not mentioned|no mention|not provided|no information|do not have|don't have"
+    # Absence claims. Measured over the eval set: "The provided documents do not
+    # explicitly state the potential financial impact" was scored *unsupported* at 0.20
+    # coverage, which reads as "the model made this up" when the model did the opposite -
+    # it declined, correctly, and said so. A lexical checker cannot verify an absence
+    # anyway: there is no span in the source that proves something is missing from it.
+    # Scoring it as a failed claim is worse than not scoring it.
+    r"|do(?:es)? not (?:explicitly |specifically )?(?:state|specify|mention|say|indicate"
+    r"|detail|disclose|cover|include|provide)"
+    r"|don't (?:explicitly |specifically )?(?:state|specify|mention|say)"
     r"|if you'd like|if you would like|would you like|let me know)\b",
     re.IGNORECASE,
 )
@@ -88,7 +97,22 @@ _META_RE = re.compile(
 # Split on sentence enders only when the next chunk starts like a new sentence, so
 # "$12.4M." and "Inc." do not fragment a claim mid-figure.
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'(\[])")
-_MARKER_RE = re.compile(r"\[(\d+)\]")
+# Citation markers. Models group them as "[1, 2, 3]" and "[1][2]" as often as they
+# write "[1]", and matching only the last form is not cosmetic: an answer citing
+# "[1, 2, 3, 4, 5]" parsed as *no markers at all*, which sent _citations down its
+# fallback path (returning every retrieved chunk) and left the digits in the claim
+# text for the grounding scorer, tanking its coverage. Observed live.
+_MARKER_RE = re.compile(r"\[\s*(\d+(?:\s*[,;]\s*\d+)*)\s*\]")
+
+
+def parse_markers(text: str) -> list[int]:
+    """Every citation index in ``text``, flattening grouped markers like "[1, 2, 3]"."""
+    out: list[int] = []
+    for group in _MARKER_RE.findall(text):
+        out.extend(int(n) for n in re.split(r"[,;]", group) if n.strip())
+    return out
+
+
 _BULLET_PREFIX = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
 
 
@@ -131,6 +155,26 @@ def is_refusal(answer: str) -> bool:
     return answer.strip().lower().startswith(REFUSAL_PREFIX)
 
 
+def asserts_nothing(answer: str) -> bool:
+    """True when the answer makes no factual claim about the corpus.
+
+    Covers the explicit guardrail *and* soft refusals — "I cannot provide an estimate…",
+    a bare "Here are the answers:" — where every sentence is a hedge, an offer of help or
+    a lead-in. Used by the engine to decide whether attaching citations would be honest:
+    a citation asserts that a source supports something, and an answer that supports
+    nothing must not carry any.
+    """
+    if is_refusal(answer):
+        return True
+    claims = split_claims(answer)
+    if not claims:
+        return True
+    return all(
+        _META_RE.search(text) or text.rstrip().endswith(":") or not _content_terms(text)
+        for text, _ in claims
+    )
+
+
 def split_claims(answer: str) -> list[tuple[str, list[int]]]:
     """Break an answer into (claim text, cited markers) pairs.
 
@@ -144,7 +188,7 @@ def split_claims(answer: str) -> list[tuple[str, list[int]]]:
         if not line:
             continue
         for sentence in _SENTENCE_SPLIT.split(line):
-            markers = [int(m) for m in _MARKER_RE.findall(sentence)]
+            markers = parse_markers(sentence)
             text = _tidy(_MARKER_RE.sub("", sentence))
             if text:
                 claims.append((text, markers))
