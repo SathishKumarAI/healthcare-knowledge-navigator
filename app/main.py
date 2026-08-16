@@ -119,7 +119,12 @@ def ready() -> schemas.ReadyResponse:
             n = engine.vectorstore._collection.count()  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001
             n = -1
-    return schemas.ReadyResponse(ready=engine is not None and n != 0, indexed_chunks=n)
+    # -1 means the collection could not be counted at all — which happens for real: a
+    # re-ingest while the API is serving resets the collection under the process, and it
+    # keeps a handle that can no longer answer. Reporting ready=true alongside
+    # indexed_chunks=-1 tells an orchestrator to keep sending traffic to an instance that
+    # has lost its index, so a probe that cannot see its collection is not ready.
+    return schemas.ReadyResponse(ready=engine is not None and n > 0, indexed_chunks=n)
 
 
 @app.get("/metrics", tags=["ops"])
@@ -136,10 +141,17 @@ _guarded = [Depends(require_api_key), Depends(rate_limit)]
 def ask(req: schemas.AskRequest, engine: RagEngine = Depends(get_engine)) -> schemas.AskResponse:
     top_k = req.top_k or settings.top_k
 
+    def _grounding(result) -> schemas.GroundingReportModel | None:  # noqa: ANN001
+        return (
+            schemas.GroundingReportModel(**asdict(result.grounding))
+            if result.grounding is not None
+            else None
+        )
+
     # Explain mode (F23): full pipeline trace, not cached (traces are for inspection).
     if req.explain:
         result, tr = engine.answer_with_trace(
-            req.question, top_k, history=_to_turns(req.history)
+            req.question, top_k, history=_to_turns(req.history), verify=req.verify
         )
         for stage, ms in result.timings_ms.items():
             ASK_LATENCY.labels(stage.replace("_ms", "")).observe(ms / 1000.0)
@@ -150,16 +162,20 @@ def ask(req: schemas.AskRequest, engine: RagEngine = Depends(get_engine)) -> sch
             provider=engine.provider,
             timings_ms=result.timings_ms,
             trace=schemas.PipelineTraceModel(**asdict(tr)),
+            grounding=_grounding(result),
         )
 
     cache: AnswerCache = app.state.cache
     cache_q = _cache_question(req.question, req.history)
-    cached = cache.get(cache_q, top_k)
-    if cached is not None:
-        CACHE_HITS.inc()
-        return schemas.AskResponse(**cached, cached=True)
+    # A cached payload was stored without a grounding report, so serving it under
+    # verify=true would silently answer "unverified" for an answer nobody verified.
+    if not req.verify:
+        cached = cache.get(cache_q, top_k)
+        if cached is not None:
+            CACHE_HITS.inc()
+            return schemas.AskResponse(**cached, cached=True)
 
-    result = engine.answer(req.question, top_k, history=_to_turns(req.history))
+    result = engine.answer(req.question, top_k, history=_to_turns(req.history), verify=req.verify)
     for stage, ms in result.timings_ms.items():
         ASK_LATENCY.labels(stage.replace("_ms", "")).observe(ms / 1000.0)
 
@@ -169,8 +185,10 @@ def ask(req: schemas.AskRequest, engine: RagEngine = Depends(get_engine)) -> sch
         citations=[schemas.Citation(**c.__dict__) for c in result.citations],
         provider=engine.provider,
         timings_ms=result.timings_ms,
+        grounding=_grounding(result),
     )
-    cache.set(cache_q, top_k, payload.model_dump(exclude={"cached"}))
+    if not req.verify:
+        cache.set(cache_q, top_k, payload.model_dump(exclude={"cached"}))
     return payload
 
 
@@ -232,6 +250,10 @@ async def upload(
     name. Supported: .pdf .md .markdown .txt and images (.png/.jpg/...) via OCR (F20).
     Re-uploading the same name replaces it.
     """
+    from typing import cast
+
+    from langchain_chroma import Chroma
+
     from app.ingest import SUPPORTED_SUFFIXES, add_file_to_store
 
     safe_name = Path(filename).name  # strip any path traversal
@@ -251,7 +273,9 @@ async def upload(
     dest.write_bytes(body)
 
     try:
-        added = add_file_to_store(engine.vectorstore, dest, settings)
+        # RagEngine holds the store as a VectorStore (provider seam); incremental
+        # add needs Chroma's collection API, and build_engine always builds Chroma.
+        added = add_file_to_store(cast(Chroma, engine.vectorstore), dest, settings)
     except ValueError as exc:
         dest.unlink(missing_ok=True)
         raise HTTPException(400, str(exc)) from exc

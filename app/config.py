@@ -4,6 +4,7 @@ A single PROVIDER switch picks the model backend:
   - "ollama" (default): free, local — llama3.1 + HuggingFace embeddings
   - "claude": Anthropic Claude + Voyage embeddings (needs API keys)
 """
+
 from __future__ import annotations
 
 from pathlib import Path
