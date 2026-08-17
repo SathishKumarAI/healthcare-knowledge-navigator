@@ -3,6 +3,7 @@
 These let the whole RAG path run in CI with no model downloads and no network —
 the provider seam (Embeddings / BaseChatModel) is exactly what we substitute.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -51,12 +52,18 @@ class FakeChat:
 @pytest.fixture
 def sample_docs() -> list[Document]:
     return [
-        Document(page_content="Hypertension is diagnosed at or above 130 over 80 mmHg",
-                 metadata={"source": "hypertension.md", "page": None}),
-        Document(page_content="Metformin is contraindicated below an eGFR of 30",
-                 metadata={"source": "metformin.md", "page": None}),
-        Document(page_content="Step 1 asthma therapy is as needed low dose ICS formoterol",
-                 metadata={"source": "asthma.md", "page": None}),
+        Document(
+            page_content="Hypertension is diagnosed at or above 130 over 80 mmHg",
+            metadata={"source": "hypertension.md", "page": None},
+        ),
+        Document(
+            page_content="Metformin is contraindicated below an eGFR of 30",
+            metadata={"source": "metformin.md", "page": None},
+        ),
+        Document(
+            page_content="Step 1 asthma therapy is as needed low dose ICS formoterol",
+            metadata={"source": "asthma.md", "page": None},
+        ),
     ]
 
 
@@ -76,3 +83,21 @@ def fake_engine(fake_store):
     from app.rag import RagEngine
 
     return RagEngine(fake_store, FakeChat(), top_k=3, provider="fake")
+
+
+@pytest.fixture
+def client(monkeypatch, fake_engine):
+    """TestClient wired to the fake engine, shared by every API-level test module.
+
+    Stops the real engine being built in lifespan, which would download an embedding
+    model and make the suite neither offline nor fast.
+    """
+    from fastapi.testclient import TestClient
+
+    import app.main as main
+
+    monkeypatch.setattr(main, "build_engine", lambda: fake_engine)
+    main.app.dependency_overrides[main.get_engine] = lambda: fake_engine
+    with TestClient(main.app) as c:
+        yield c
+    main.app.dependency_overrides.clear()

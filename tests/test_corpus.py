@@ -22,9 +22,18 @@ def test_xml_to_text_strips_tags_and_scripts():
 
 
 def test_find_open_access_returns_top_result(monkeypatch):
-    resp = {"resultList": {"result": [
-        {"id": "PMC123", "source": "PMC", "title": "Hypertension guideline", "isOpenAccess": "Y"},
-    ]}}
+    resp = {
+        "resultList": {
+            "result": [
+                {
+                    "id": "PMC123",
+                    "source": "PMC",
+                    "title": "Hypertension guideline",
+                    "isOpenAccess": "Y",
+                },
+            ]
+        }
+    }
     monkeypatch.setattr(fetch_corpus, "_get", lambda url: json.dumps(resp).encode())
     result = fetch_corpus.find_open_access("hypertension management")
     assert result is not None
@@ -33,15 +42,20 @@ def test_find_open_access_returns_top_result(monkeypatch):
 
 
 def test_find_open_access_none_when_no_results(monkeypatch):
-    monkeypatch.setattr(fetch_corpus, "_get", lambda url: json.dumps({"resultList": {"result": []}}).encode())
+    monkeypatch.setattr(
+        fetch_corpus, "_get", lambda url: json.dumps({"resultList": {"result": []}}).encode()
+    )
     assert fetch_corpus.find_open_access("nonexistent topic") is None
 
 
 def test_fetch_document_falls_back_to_abstract():
     # inEPMC != "Y" -> no full-text call; uses the abstract (no network needed).
     result = {
-        "source": "MED", "id": "999", "title": "Asthma stepwise therapy",
-        "abstractText": "<p>Start with a low-dose ICS.</p>", "inEPMC": "N",
+        "source": "MED",
+        "id": "999",
+        "title": "Asthma stepwise therapy",
+        "abstractText": "<p>Start with a low-dose ICS.</p>",
+        "inEPMC": "N",
     }
     doc = fetch_corpus.fetch_document(result)
     assert doc is not None

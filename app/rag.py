@@ -9,7 +9,6 @@ switch and offline testing possible: tests inject fakes for every collaborator.
 
 from __future__ import annotations
 
-import re
 import time
 from dataclasses import dataclass, field
 
@@ -17,12 +16,14 @@ from langchain_core.documents import Document
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.vectorstores import VectorStore
 
+from app import grounding as _grounding
 from app import trace as _trace
 from app.prompts import CONDENSE_PROMPT, SYSTEM_PROMPT
 from app.rerank import NoOpReranker, Reranker
-from app.retrieval import DenseRetriever, HybridRetriever, Retriever
+from app.retrieval import DenseRetriever, HybridRetriever, Retriever, cap_per_source
 
-_MARKER_RE = re.compile(r"\[(\d+)\]")
+# Marker parsing lives in app.grounding so the two cannot drift; a citation the
+# engine recognises must be one the verifier recognises.
 _SNIPPET_LEN = 280
 
 
@@ -48,6 +49,7 @@ class Answer:
     answer: str
     citations: list[Citation] = field(default_factory=list)
     timings_ms: dict[str, float] = field(default_factory=dict)
+    grounding: _grounding.GroundingReport | None = None  # F24, only when verify=True
 
 
 def _format_context(docs: list[Document]) -> str:
@@ -78,6 +80,7 @@ class RagEngine:
         reranker: Reranker | None = None,
         fetch_k: int = 20,
         history_max_turns: int = 6,
+        max_chunks_per_source: int = 0,
     ) -> None:
         self.vectorstore = vectorstore
         self.llm = llm
@@ -87,6 +90,7 @@ class RagEngine:
         self.reranker = reranker or NoOpReranker()
         self.fetch_k = fetch_k
         self.history_max_turns = history_max_turns
+        self.max_chunks_per_source = max_chunks_per_source
 
     # --- conversation memory (F19) ---
 
@@ -112,10 +116,18 @@ class RagEngine:
     # --- retrieval (F02 / F16 / F17) ---
 
     def _retrieve(self, query: str, top_k: int) -> list[Document]:
-        """Fetch candidates then (optionally) rerank down to ``top_k``."""
-        fetch = max(top_k, self.fetch_k) if not isinstance(self.reranker, NoOpReranker) else top_k
+        """Fetch candidates, optionally rerank, then enforce source diversity.
+
+        When the per-source cap is on, always over-fetch: capping can only spread results
+        across sources if there are spare candidates to reach for, and asking for exactly
+        top_k leaves nothing to substitute in.
+        """
+        capping = self.max_chunks_per_source > 0
+        needs_candidates = capping or not isinstance(self.reranker, NoOpReranker)
+        fetch = max(top_k, self.fetch_k) if needs_candidates else top_k
         candidates = self.retriever.retrieve(query, fetch)
-        return self.reranker.rerank(query, candidates, top_k)
+        ranked = self.reranker.rerank(query, candidates, fetch if capping else top_k)
+        return cap_per_source(ranked, top_k, self.max_chunks_per_source)
 
     def _build_messages(self, question: str, context: str) -> list[tuple[str, str]]:
         user = (
@@ -128,10 +140,17 @@ class RagEngine:
     def _citations(self, answer_text: str, docs: list[Document]) -> list[Citation]:
         """Return citations for the markers the answer actually used.
 
-        Falls back to all retrieved chunks if the model emitted no markers, so the
-        caller always gets a traceable source list.
+        Falls back to all retrieved chunks when the model emitted no markers, so an
+        answer that forgot to cite still carries provenance — *unless* the answer asserts
+        nothing. Running the app surfaced the failure that motivated the exception: a
+        refusal came back reading "The provided documents do not cover this" with four
+        citations attached, because the fallback fired on the absent markers. A citation
+        is a claim that a source supports something; attaching four to an answer that
+        supports nothing inverts the product's central promise.
         """
-        used = {int(m) for m in _MARKER_RE.findall(answer_text)}
+        used = set(_grounding.parse_markers(answer_text))
+        if not used and _grounding.asserts_nothing(answer_text):
+            return []
         indices = sorted(used) if used else list(range(1, len(docs) + 1))
         out: list[Citation] = []
         for i in indices:
@@ -152,6 +171,7 @@ class RagEngine:
         question: str,
         top_k: int | None = None,
         history: list[Turn] | None = None,
+        verify: bool = False,
     ) -> Answer:
         k = top_k or self.top_k
         timings: dict[str, float] = {}
@@ -183,11 +203,15 @@ class RagEngine:
         timings["generate_ms"] = round((time.perf_counter() - t1) * 1000, 1)
 
         text = response.content if isinstance(response.content, str) else str(response.content)
+        answer_text = text.strip()
         return Answer(
             question=question,
-            answer=text.strip(),
+            answer=answer_text,
             citations=self._citations(text, docs),
             timings_ms=timings,
+            # Verification needs the full chunk text, which only exists here — the F23
+            # trace carries 280-char snippets, far too short to check a claim against.
+            grounding=_grounding.verify_answer(answer_text, docs) if verify else None,
         )
 
     def _retrieval_mode(self) -> str:
@@ -198,7 +222,8 @@ class RagEngine:
         question: str,
         top_k: int | None = None,
         history: list[Turn] | None = None,
-    ) -> tuple[Answer, "_trace.PipelineTrace"]:
+        verify: bool = False,
+    ) -> tuple[Answer, _trace.PipelineTrace]:
         """Answer a question AND return a full pipeline trace (feature F23).
 
         Same behaviour as :meth:`answer`, but records every stage — condensed query,
@@ -255,11 +280,13 @@ class RagEngine:
         timings["generate_ms"] = round((time.perf_counter() - t1) * 1000, 1)
         text = response.content if isinstance(response.content, str) else str(response.content)
 
+        answer_text = text.strip()
         ans = Answer(
             question=question,
-            answer=text.strip(),
+            answer=answer_text,
             citations=self._citations(text, docs),
             timings_ms=timings,
+            grounding=_grounding.verify_answer(answer_text, docs) if verify else None,
         )
         tr = _trace.PipelineTrace(
             original_question=question,

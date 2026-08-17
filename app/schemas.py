@@ -25,6 +25,13 @@ class AskRequest(BaseModel):
         False,
         description="If true, include a full pipeline trace in the response (F23).",
     )
+    verify: bool = Field(
+        False,
+        description=(
+            "If true, check every claim in the answer against the chunk it cites and "
+            "return a per-claim grounding report (F24)."
+        ),
+    )
 
 
 class Citation(BaseModel):
@@ -71,6 +78,58 @@ class PipelineTraceModel(BaseModel):
     timings_ms: dict[str, float] = Field(default_factory=dict)
 
 
+class ClaimVerdictModel(BaseModel):
+    """One claim from the answer, checked against the chunk it cites (feature F24)."""
+
+    text: str
+    markers: list[int] = Field(default_factory=list)
+    status: str = Field(..., description="grounded | weak | unsupported | meta")
+    coverage: float = Field(..., description="Fraction of the claim's terms found in the source")
+    missing_terms: list[str] = Field(default_factory=list)
+    unsupported_figures: list[str] = Field(
+        default_factory=list,
+        description="Figures in the claim that appear nowhere in the cited chunk.",
+    )
+    source: str | None = None
+    span_text: str = ""
+    span_start: int | None = None
+    span_end: int | None = None
+
+
+class FigureConflictModel(BaseModel):
+    """Two retrieved sources giving different values for the same quantity (feature F27)."""
+
+    context: list[str] = Field(
+        default_factory=list, description="Shared words naming what the figures measure"
+    )
+    values: list[dict] = Field(
+        default_factory=list, description="{value, source, snippet} per disagreeing source"
+    )
+
+
+class GroundingReportModel(BaseModel):
+    """Per-claim verification of an answer against its retrieved chunks (feature F24)."""
+
+    claims: list[ClaimVerdictModel] = Field(default_factory=list)
+    conflicts: list[FigureConflictModel] = Field(
+        default_factory=list,
+        description=(
+            "Disagreements between the retrieved sources themselves (F27). Claim-level "
+            "verification cannot see these: it checks the answer against the chunks, so a "
+            "false figure from a hostile source is faithfully 'grounded'."
+        ),
+    )
+    grounded: int = 0
+    weak: int = 0
+    unsupported: int = 0
+    meta: int = Field(0, description="Hedges/offers of help, excluded from the score")
+    score: float = 0.0
+    verdict: str = Field(
+        "unverified", description="grounded | mixed | unsupported | refusal | empty"
+    )
+    note: str = ""
+
+
 class AskResponse(BaseModel):
     question: str
     answer: str
@@ -79,7 +138,10 @@ class AskResponse(BaseModel):
     cached: bool = False
     timings_ms: dict[str, float] = Field(default_factory=dict)
     trace: PipelineTraceModel | None = Field(
-        None, description="Pipeline trace, present only when explain=true (F23)."
+        default=None, description="Pipeline trace, present only when explain=true (F23)."
+    )
+    grounding: GroundingReportModel | None = Field(
+        default=None, description="Claim grounding, present only when verify=true (F24)."
     )
 
 

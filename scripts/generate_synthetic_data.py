@@ -10,6 +10,7 @@ Usage:
 
 Deterministic given a seed: no LLM, no network — just templates + a seeded RNG.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -18,9 +19,7 @@ from pathlib import Path
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
-DISCLAIMER = (
-    "> SYNTHETIC SAMPLE — fictional content for demo/testing only. Not medical advice.\n"
-)
+DISCLAIMER = "> SYNTHETIC SAMPLE — fictional content for demo/testing only. Not medical advice.\n"
 
 
 def hypertension_guideline(rng: random.Random) -> tuple[str, str]:
@@ -74,9 +73,9 @@ First-line oral agent for type 2 diabetes mellitus.
 
 
 def asthma_management(rng: random.Random) -> tuple[str, str]:
-    body = """# Asthma Management Summary (synthetic sample)
+    body = f"""# Asthma Management Summary (synthetic sample)
 
-{disc}
+{DISCLAIMER}
 ## Stepwise therapy
 - Step 1: as-needed low-dose inhaled corticosteroid (ICS)-formoterol.
 - Step 2: daily low-dose ICS.
@@ -90,7 +89,7 @@ def asthma_management(rng: random.Random) -> tuple[str, str]:
 ## Review
 - Reassess control, inhaler technique, and adherence at every visit.
 - Step down therapy after 3 months of sustained control.
-""".format(disc=DISCLAIMER)
+"""
     return "asthma_management.md", body
 
 

@@ -52,6 +52,7 @@ def build_engine() -> RagEngine:
         reranker=build_reranker(settings),
         fetch_k=settings.retrieve_fetch_k,
         history_max_turns=settings.history_max_turns,
+        max_chunks_per_source=settings.max_chunks_per_source,
     )
 
 
@@ -67,16 +68,45 @@ def _cache_question(question: str, history: list[schemas.Turn]) -> str:
     return f"{question}\x00{tail}"
 
 
+def _count_chunks(engine: RagEngine | None) -> int | None:
+    """Chunks in the live collection, or None when the handle can no longer answer.
+
+    None is the signal that the process is holding a collection that has been replaced
+    underneath it — see :func:`get_engine`.
+    """
+    if engine is None:
+        return None
+    try:
+        return int(engine.vectorstore._collection.count())  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - non-Chroma store, or a handle whose collection is gone
+        return None
+
+
+def _corpus_fingerprint() -> str:
+    """Identify the indexed corpus, so cached answers do not outlive it."""
+    engine = getattr(app.state, "engine", None)
+    if engine is None:
+        return "no-index"
+    count = _count_chunks(engine)
+    if count is None:
+        return "unknown"
+    return f"{settings.collection_name}:{count}"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
-    app.state.cache = AnswerCache(settings)
     try:
         app.state.engine = build_engine()
         log.info("engine_ready", provider=settings.provider)
     except Exception as exc:  # noqa: BLE001 - degrade gracefully if not yet ingested
         app.state.engine = None
         log.warning("engine_unavailable", error=str(exc))
+    # Built after the engine so the cache key can carry a corpus fingerprint: an answer
+    # cached against a 4-chunk index must not be served from an 11-chunk one. Chunk count
+    # is coarse — it misses an edit that leaves the count unchanged — but it catches
+    # ingest, upload and re-chunking, which is what actually changes answers.
+    app.state.cache = AnswerCache(settings, corpus_fingerprint=_corpus_fingerprint())
     yield
 
 
@@ -91,7 +121,35 @@ app.add_middleware(
 
 
 def get_engine() -> RagEngine:
+    """The live engine, rebuilt in place if its collection was replaced underneath it.
+
+    `python -m app.ingest` is the documented way to (re)build the index and it runs in a
+    *separate process*. Doing that while the API serves used to break the running
+    instance permanently: Chroma resets the collection, this process keeps a handle to
+    the old one, and every subsequent request died with an opaque 500 — the UI reported
+    "Could not load the trace. Is the backend running?" while the backend was running
+    fine. Only a restart recovered it.
+
+    Rebuilding on demand costs one collection count per request. Measured at 0.25 ms
+    (2000 calls, local Chroma/SQLite, 11 chunks) against an /v1/ask that spends seconds
+    in the LLM — the cost is not detectable, and it removes the failure class entirely.
+    """
     engine = getattr(app.state, "engine", None)
+
+    if engine is not None and _count_chunks(engine) is None:
+        log.warning("engine_handle_stale", action="rebuilding")
+        try:
+            engine = build_engine()
+        except Exception as exc:  # noqa: BLE001 - report why rather than 500 opaquely
+            app.state.engine = None
+            raise HTTPException(503, f"Index unavailable and could not be reloaded: {exc}") from exc
+        app.state.engine = engine
+        # The corpus changed, so the old cache is keyed to a corpus that no longer
+        # exists. Rebuilding the cache re-derives the fingerprint and stops answers from
+        # the previous index being served against the new one.
+        app.state.cache = AnswerCache(settings, corpus_fingerprint=_corpus_fingerprint())
+        log.info("engine_reloaded", chunks=_count_chunks(engine))
+
     if engine is None:
         raise HTTPException(503, "Index not built. Run `python -m app.ingest` first.")
     return engine
@@ -113,13 +171,14 @@ def health() -> schemas.HealthResponse:
 @app.get("/ready", response_model=schemas.ReadyResponse, tags=["ops"])
 def ready() -> schemas.ReadyResponse:
     engine = getattr(app.state, "engine", None)
-    n = 0
-    if engine is not None:
-        try:
-            n = engine.vectorstore._collection.count()  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001
-            n = -1
-    return schemas.ReadyResponse(ready=engine is not None and n != 0, indexed_chunks=n)
+    count = _count_chunks(engine)
+    n = 0 if engine is None else (-1 if count is None else count)
+    # -1 means the collection could not be counted at all — which happens for real: a
+    # re-ingest while the API is serving resets the collection under the process, and it
+    # keeps a handle that can no longer answer. Reporting ready=true alongside
+    # indexed_chunks=-1 tells an orchestrator to keep sending traffic to an instance that
+    # has lost its index, so a probe that cannot see its collection is not ready.
+    return schemas.ReadyResponse(ready=engine is not None and n > 0, indexed_chunks=n)
 
 
 @app.get("/metrics", tags=["ops"])
@@ -136,10 +195,17 @@ _guarded = [Depends(require_api_key), Depends(rate_limit)]
 def ask(req: schemas.AskRequest, engine: RagEngine = Depends(get_engine)) -> schemas.AskResponse:
     top_k = req.top_k or settings.top_k
 
+    def _grounding(result) -> schemas.GroundingReportModel | None:  # noqa: ANN001
+        return (
+            schemas.GroundingReportModel(**asdict(result.grounding))
+            if result.grounding is not None
+            else None
+        )
+
     # Explain mode (F23): full pipeline trace, not cached (traces are for inspection).
     if req.explain:
         result, tr = engine.answer_with_trace(
-            req.question, top_k, history=_to_turns(req.history)
+            req.question, top_k, history=_to_turns(req.history), verify=req.verify
         )
         for stage, ms in result.timings_ms.items():
             ASK_LATENCY.labels(stage.replace("_ms", "")).observe(ms / 1000.0)
@@ -150,16 +216,20 @@ def ask(req: schemas.AskRequest, engine: RagEngine = Depends(get_engine)) -> sch
             provider=engine.provider,
             timings_ms=result.timings_ms,
             trace=schemas.PipelineTraceModel(**asdict(tr)),
+            grounding=_grounding(result),
         )
 
     cache: AnswerCache = app.state.cache
     cache_q = _cache_question(req.question, req.history)
-    cached = cache.get(cache_q, top_k)
-    if cached is not None:
-        CACHE_HITS.inc()
-        return schemas.AskResponse(**cached, cached=True)
+    # A cached payload was stored without a grounding report, so serving it under
+    # verify=true would silently answer "unverified" for an answer nobody verified.
+    if not req.verify:
+        cached = cache.get(cache_q, top_k)
+        if cached is not None:
+            CACHE_HITS.inc()
+            return schemas.AskResponse(**cached, cached=True)
 
-    result = engine.answer(req.question, top_k, history=_to_turns(req.history))
+    result = engine.answer(req.question, top_k, history=_to_turns(req.history), verify=req.verify)
     for stage, ms in result.timings_ms.items():
         ASK_LATENCY.labels(stage.replace("_ms", "")).observe(ms / 1000.0)
 
@@ -169,8 +239,10 @@ def ask(req: schemas.AskRequest, engine: RagEngine = Depends(get_engine)) -> sch
         citations=[schemas.Citation(**c.__dict__) for c in result.citations],
         provider=engine.provider,
         timings_ms=result.timings_ms,
+        grounding=_grounding(result),
     )
-    cache.set(cache_q, top_k, payload.model_dump(exclude={"cached"}))
+    if not req.verify:
+        cache.set(cache_q, top_k, payload.model_dump(exclude={"cached"}))
     return payload
 
 
@@ -232,6 +304,10 @@ async def upload(
     name. Supported: .pdf .md .markdown .txt and images (.png/.jpg/...) via OCR (F20).
     Re-uploading the same name replaces it.
     """
+    from typing import cast
+
+    from langchain_chroma import Chroma
+
     from app.ingest import SUPPORTED_SUFFIXES, add_file_to_store
 
     safe_name = Path(filename).name  # strip any path traversal
@@ -251,7 +327,9 @@ async def upload(
     dest.write_bytes(body)
 
     try:
-        added = add_file_to_store(engine.vectorstore, dest, settings)
+        # RagEngine holds the store as a VectorStore (provider seam); incremental
+        # add needs Chroma's collection API, and build_engine always builds Chroma.
+        added = add_file_to_store(cast(Chroma, engine.vectorstore), dest, settings)
     except ValueError as exc:
         dest.unlink(missing_ok=True)
         raise HTTPException(400, str(exc)) from exc

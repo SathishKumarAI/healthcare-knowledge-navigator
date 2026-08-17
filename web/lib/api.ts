@@ -45,6 +45,42 @@ export type PipelineTrace = {
   timings_ms: Record<string, number>;
 };
 
+// --- claim grounding / verification (F24) ---
+export type ClaimStatus = "grounded" | "weak" | "unsupported" | "meta";
+
+export type ClaimVerdict = {
+  text: string;
+  markers: number[];
+  status: ClaimStatus;
+  coverage: number;
+  missing_terms: string[];
+  unsupported_figures: string[];
+  source: string | null;
+  span_text: string;
+  span_start: number | null;
+  span_end: number | null;
+};
+
+// Two retrieved sources disagreeing about the same quantity (F27). Distinct from a claim
+// verdict on purpose: claim checking asks "does the answer match its sources", which is
+// silent when the sources themselves conflict.
+export type FigureConflict = {
+  context: string[];
+  values: { value: string; source: string; snippet: string }[];
+};
+
+export type GroundingReport = {
+  claims: ClaimVerdict[];
+  conflicts: FigureConflict[];
+  grounded: number;
+  weak: number;
+  unsupported: number;
+  meta: number;
+  score: number;
+  verdict: "grounded" | "mixed" | "unsupported" | "refusal" | "empty" | "unverified";
+  note: string;
+};
+
 export type AskResponse = {
   question: string;
   answer: string;
@@ -53,9 +89,13 @@ export type AskResponse = {
   cached: boolean;
   timings_ms: Record<string, number>;
   trace?: PipelineTrace | null;
+  grounding?: GroundingReport | null;
 };
 
-/** Ask with explain=true to get the full pipeline trace (F23). Not streamed. */
+/**
+ * Ask with explain=true for the pipeline trace (F23) and verify=true for the claim
+ * grounding report (F24). Not streamed — the inspector re-asks the turn to get both.
+ */
 export async function askExplain(
   question: string,
   history: Turn[] = [],
@@ -64,7 +104,13 @@ export async function askExplain(
   const res = await fetch(`${siteConfig.apiBaseUrl}/v1/ask`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ question, history, top_k: topK ?? null, explain: true }),
+    body: JSON.stringify({
+      question,
+      history,
+      top_k: topK ?? null,
+      explain: true,
+      verify: true,
+    }),
   });
   if (!res.ok) throw await asError(res);
   return res.json();
@@ -145,6 +191,13 @@ export async function askStream(
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
+    // sse-starlette terminates lines with CRLF, so frames arrive separated by
+    // "\r\n\r\n". Splitting on "\n\n" alone never matched: every frame stayed in the
+    // buffer, the whole stream was handed to handleFrame once as a single malformed
+    // frame at end-of-stream, JSON.parse threw, and the catch swallowed it — so the
+    // UI showed a caret and never a single token. Normalise the buffer (not the raw
+    // chunk) so a CR landing on a chunk boundary still pairs with its LF.
+    buffer = buffer.replace(/\r\n/g, "\n");
     let sep: number;
     while ((sep = buffer.indexOf("\n\n")) !== -1) {
       handleFrame(buffer.slice(0, sep));

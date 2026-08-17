@@ -13,22 +13,100 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -r requirements-dev.txt
+
+      # From the lock, not the ranges. Every drift that broke this gate between July and
+      # August 2026 — a ruff formatter that reformatted 14 files, a numpy whose stubs
+      # mypy refused, langchain provider kwargs that moved — came in through an
+      # unpinned range resolving differently than it had on the author's machine.
+      - name: Install (locked)
+        run: pip install -r requirements-dev.lock
+
+      # The lock must be a faithful compile of the ranges. Editing requirements.txt and
+      # forgetting scripts/lock.sh would otherwise ship a lock that no longer matches
+      # what the project says it depends on.
+      #
+      # This runs scripts/lock.sh rather than restating its uv invocation. The previous
+      # version restated it, drifted from it (no --universal) and wrote to /tmp, so it
+      # compared a linux-only resolution against a universal one AND compared headers
+      # that record the -o path. It reported a stale lock on every run, unfixable by
+      # re-locking. A check that reimplements the thing it checks is a check that lies.
+      - name: Lockfile is up to date
+        run: |
+          pip install uv
+          bash scripts/lock.sh
+          git diff --exit-code -- requirements.lock requirements-dev.lock \
+            || { echo "::error::locks are stale - run scripts/lock.sh and commit the result"; exit 1; }
+
+      # eval/ and scripts/ were outside the gate, which is part of why the eval harness
+      # shipped unable to import app/, and the corpus fetcher shipped exiting 0 on a
+      # fetch that downloaded nothing.
       - name: Lint
-        run: ruff check app tests
+        run: ruff check app tests eval scripts
       - name: Format check
-        run: ruff format --check app tests
+        run: ruff format --check app tests eval scripts
       - name: Type check
         run: mypy app
       - name: Tests (offline, fake provider)
         run: pytest
 
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install
+        run: npm ci
+        working-directory: web
+      # The frontend had no CI at all, which is how a CRLF SSE bug that stopped the chat
+      # rendering any answer shipped and stayed unnoticed.
+      - name: Type check
+        run: npx tsc --noEmit
+        working-directory: web
+      - name: Tests
+        run: npm test
+        working-directory: web
+      - name: Build
+        run: npm run build
+        working-directory: web
+
   docker:
     runs-on: ubuntu-latest
-    needs: quality
+    needs: [quality, web]
     steps:
       - uses: actions/checkout@v4
       - name: Build CPU image
         run: docker build -t healthcare-knowledge-navigator:ci .
+
+      # The images were built and never inspected, so a known-vulnerable base layer would
+      # ship silently. ignore-unfixed is the important flag: a CVE with no available patch
+      # is not something a merge can act on, and blocking on it trains people to bypass the
+      # gate. A fixable HIGH/CRITICAL is actionable, so it fails.
+      - name: Scan CPU image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: healthcare-knowledge-navigator:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
       - name: Build GPU image (build only; no GPU needed to build)
         run: docker build -f Dockerfile.gpu -t healthcare-knowledge-navigator:ci-gpu .
+
+      # The GPU image is scanned but does not block. It is built on an NVIDIA CUDA base
+      # that is large, updated on NVIDIA's schedule rather than ours, and not the image
+      # this project deploys. Failing the build on a CVE nobody here can fix would make the
+      # whole docker job advisory in practice; reporting it keeps the information without
+      # the false authority.
+      - name: Scan GPU image (report only)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: healthcare-knowledge-navigator:ci-gpu
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "0"
+          format: table
