@@ -1,6 +1,6 @@
 # STATUS — healthcare-knowledge-navigator (MED)
 
-**Last touched:** 2026-08-16 · **Branch:** `chore/sync-from-fin-2026-08` · **Tree:** clean
+**Last touched:** 2026-08-17 · **Branch:** `chore/sync-from-fin-2026-08` · **Tree:** clean
 
 ## What this is
 
@@ -12,6 +12,11 @@ Shared engine: 16 files listed in `ENGINE_MANIFEST.sha256`, copied by
 `scripts/sync_engine.py`. Everything else is this repo's own.
 
 ## Where it stopped
+
+**PR #1 is open and rebuilding.** The three sync commits that had only ever existed on
+one disk are pushed. `quality` and `web` pass — **the first time this repo's CI has run
+`pytest` and `mypy` at all**. `docker` failed on a base-image CVE, which is fixed in the
+same PR and verified locally.
 
 Synced from FIN and verified, **not developed further**. FIN is where the work happens;
 this repo receives it.
@@ -28,7 +33,21 @@ sync_engine --check   in sync
 
 ## Next action
 
-Nothing is owed. If FIN changes the engine, re-run the sync below and re-run the gate.
+1. **Merge PR #1** when green.
+2. **Take FIN's provider work.** FIN merged its PR #20: the provider seam now has
+   independent `LLM_PROVIDER` / `EMBED_PROVIDER` halves, an OpenAI-compatible adapter, and
+   a Chroma collection keyed on the embedding model. Run the sync below, **plus a
+   hand-copy** of the provider block in `app/config.py` (~83 lines),
+   `tests/test_providers.py`, and the `langchain-openai` line in `requirements.txt`. The
+   engine now *imports* `ProviderName` and `LOCAL_HOSTS` from `app/config.py`, so a sync
+   without the config block will not import. Then relock and regenerate the manifest.
+3. **`chunk_size` 1000 → 400.** Approved 2026-08-17. This repo is still at FIN's old value
+   because `config.py` is never synced. Measured on this repo's own
+   `eval/qa_dataset.jsonl`, dense hit@1 does **not** improve — see the umbrella
+   `../STATUS.md` for the table. Ship it for citation precision, and say so in the commit:
+   at 1000 every document is a single chunk, so `app/grounding.py:240` verifies a claim
+   against an entire document's token set and any claim assembled from scattered facts
+   "verifies". Do not borrow FIN's hit-rate justification.
 
 ## What arrived in the last sync, and why it matters here
 
@@ -70,7 +89,21 @@ failure, not a cosmetic one.
   settings the new engine code reads.
 - **`requirements.lock` is what ships**, not `requirements.txt`. The Dockerfile installs
   from the lock. Editing the ranges without running `scripts/lock.sh` changes nothing.
-- Nothing here has been pushed.
+- **CRLF was wrong here and is now fixed.** This tree held 2457 CR across `app/*.py` and
+  all 12 manifest entries were wrong — passing on Windows, failing on every Linux
+  checkout. Fixed by refreshing through `.gitattributes` (`git rm --cached -r . &&
+  git reset --hard`, no content change) plus FIN's `sync_engine.py`, whose generator now
+  writes the manifest with `newline="
+"`. That is the recipe if it returns.
+- **`.github/workflows/ci.yml` embeds this repo's name** in the `docker build` tag and the
+  Trivy `image-ref`. Copying FIN's file wholesale retags this image as FIN's — substitute
+  the name.
+- **A green Trivy run is not a Trivy run that stays green.** FIN's `docker` job passed and
+  this one failed on the identical base image minutes later, purely because Trivy's DB
+  updated. The Dockerfile now runs `apt-get upgrade` in the runtime stage.
+- **This repo still chunks at 1000** while FIN moved to 400 — see "Next action". The
+  collection is `healthcare_kb`, and note it is now suffixed with a hash of the embedding model
+  once FIN's provider work lands.
 
 ## Commands
 
